@@ -26,30 +26,23 @@ COPY . .
 ENV DOCKER_ENV=true
 ENV DOCKER_BUILD=true
 
-# 弹弹play API 凭证（构建时注入，用于官方镜像开箱即用弹幕功能）
-ARG DANDANPLAY_APP_ID
-ARG DANDANPLAY_APP_SECRET
-
 # 生成生产构建
 RUN pnpm run build
 
 # ---- 第 3 阶段：生成运行时镜像 ----
 FROM node:20-alpine AS runner
 
-# 创建非 root 用户
-RUN addgroup -g 1001 -S nodejs && adduser -u 1001 -S nextjs -G nodejs
+# 安装运行期 FFmpeg。服务端转存下载依赖 ffmpeg/ffprobe，VPS Docker 镜像需开箱可用。
+RUN apk add --no-cache ca-certificates ffmpeg \
+  && addgroup -g 1001 -S nodejs \
+  && adduser -u 1001 -S nextjs -G nodejs
 
 WORKDIR /app
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3000
 ENV DOCKER_ENV=true
-
-# 弹弹play API 凭证（从构建阶段继承，支持官方镜像开箱即用）
-ARG DANDANPLAY_APP_ID
-ARG DANDANPLAY_APP_SECRET
-ENV DANDANPLAY_APP_ID=${DANDANPLAY_APP_ID}
-ENV DANDANPLAY_APP_SECRET=${DANDANPLAY_APP_SECRET}
+ENV FFMPEG_DOWNLOAD_DIR=/app/.cache/ffmpeg-downloads
 
 # 从构建器中复制 standalone 输出
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
@@ -60,6 +53,10 @@ COPY --from=builder --chown=nextjs:nodejs /app/start.js ./start.js
 # 从构建器中复制 public 和 .next/static 目录
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+# 预创建服务端转存目录，确保非 root 用户可写。
+RUN mkdir -p /app/.cache/ffmpeg-downloads \
+  && chown -R nextjs:nodejs /app/.cache
 
 # 切换到非特权用户
 USER nextjs

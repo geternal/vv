@@ -52,6 +52,7 @@ import {
   AdminConfig,
   DanmuCustomNode,
   PrivateLibraryConnector,
+  SearchResultLoadMode,
 } from '@/lib/admin.types';
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
 import { DEFAULT_PANSOU_SERVER_URL } from '@/lib/pansou';
@@ -359,6 +360,7 @@ interface SiteConfig {
   TmdbReverseProxy: string;
   DisableYellowFilter: boolean;
   FluidSearch: boolean;
+  SearchResultLoadMode: SearchResultLoadMode;
   // 登录页面背景图
   LoginBackground: string;
 }
@@ -371,6 +373,7 @@ interface DataSource {
   detail?: string;
   disabled?: boolean;
   is_adult?: boolean; // 标记是否为成人资源
+  disable_ad_filter?: boolean; // 该源不走 m3u8 广告过滤代理
   from: 'config' | 'custom';
 }
 
@@ -437,10 +440,16 @@ const CollapsibleTab = ({
 interface UserConfigProps {
   config: AdminConfig | null;
   role: 'owner' | 'admin' | null;
+  storageMode: 'cloud' | 'local';
   refreshConfig: () => Promise<void>;
 }
 
-const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
+const UserConfig = ({
+  config,
+  role,
+  storageMode,
+  refreshConfig,
+}: UserConfigProps) => {
   const { alertModal, showAlert, hideAlert } = useAlertModal();
   const { isLoading, withLoading } = useLoadingState();
   const [showAddUserForm, setShowAddUserForm] = useState(false);
@@ -512,6 +521,46 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
 
   // 获取用户组列表
   const userGroups = config?.UserConfig?.Tags || [];
+  const registrationEnabled = config?.UserConfig?.RegistrationEnabled === true;
+  const registrationDefaultUserGroup =
+    config?.UserConfig?.RegistrationDefaultUserGroup || '';
+  const registrationDefaultGroupExists =
+    !registrationDefaultUserGroup ||
+    userGroups.some((group) => group.name === registrationDefaultUserGroup);
+  const canManageRegistration = role === 'owner' && storageMode !== 'local';
+
+  const handleRegistrationSettingsChange = async (
+    enabled: boolean,
+    defaultUserGroup: string,
+    successMessage = enabled ? '公开注册已开启' : '公开注册已关闭',
+  ) => {
+    await withLoading('saveRegistrationSettings', async () => {
+      try {
+        const res = await fetch('/api/admin/user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'updateRegistrationSettings',
+            registrationEnabled: enabled,
+            registrationDefaultUserGroup: defaultUserGroup,
+          }),
+        });
+
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || `保存失败: ${res.status}`);
+        }
+
+        await refreshConfig();
+        showSuccess(successMessage, showAlert);
+      } catch (err) {
+        showError(
+          err instanceof Error ? err.message : '保存注册设置失败',
+          showAlert,
+        );
+      }
+    });
+  };
 
   // 处理用户组相关操作
   const handleUserGroupAction = async (
@@ -925,6 +974,133 @@ const UserConfig = ({ config, role, refreshConfig }: UserConfigProps) => {
 
   return (
     <div className='space-y-6'>
+      {/* 公开注册策略 */}
+      <div>
+        <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300 mb-3'>
+          公开注册
+        </h4>
+        <div className='space-y-4 rounded-lg border border-gray-200 bg-gray-50 p-4 dark:border-gray-700 dark:bg-gray-900/40'>
+          <div className='flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between'>
+            <div>
+              <div className='flex items-center gap-2'>
+                <p className='text-sm font-medium text-gray-900 dark:text-gray-100'>
+                  允许访客自行注册账号
+                </p>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                    storageMode === 'local'
+                      ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300'
+                      : registrationEnabled
+                        ? 'bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-300'
+                        : 'bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-300'
+                  }`}
+                >
+                  {storageMode === 'local'
+                    ? '存储不支持'
+                    : registrationEnabled
+                      ? '开放中'
+                      : '已关闭'}
+                </span>
+              </div>
+              <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+                开启后，登录页会出现注册入口；关闭后服务端立即拒绝新的注册请求。
+              </p>
+            </div>
+            <button
+              type='button'
+              role='switch'
+              aria-label='允许访客自行注册账号'
+              aria-checked={registrationEnabled}
+              onClick={() =>
+                void handleRegistrationSettingsChange(
+                  !registrationEnabled,
+                  registrationDefaultUserGroup,
+                )
+              }
+              disabled={
+                !canManageRegistration || isLoading('saveRegistrationSettings')
+              }
+              className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${
+                registrationEnabled
+                  ? buttonStyles.toggleOn
+                  : buttonStyles.toggleOff
+              } ${
+                !canManageRegistration || isLoading('saveRegistrationSettings')
+                  ? 'cursor-not-allowed opacity-50'
+                  : ''
+              }`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full ${
+                  buttonStyles.toggleThumb
+                } transition-transform ${
+                  registrationEnabled
+                    ? buttonStyles.toggleThumbOn
+                    : buttonStyles.toggleThumbOff
+                }`}
+              />
+            </button>
+          </div>
+
+          <div>
+            <label
+              htmlFor='registration-default-user-group'
+              className='mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300'
+            >
+              新注册用户默认用户组
+            </label>
+            <select
+              id='registration-default-user-group'
+              value={registrationDefaultUserGroup}
+              onChange={(event) =>
+                void handleRegistrationSettingsChange(
+                  registrationEnabled,
+                  event.target.value,
+                  '默认注册用户组已更新',
+                )
+              }
+              disabled={
+                !canManageRegistration || isLoading('saveRegistrationSettings')
+              }
+              className='w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 disabled:cursor-not-allowed disabled:opacity-60 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100'
+            >
+              <option value=''>不分配用户组（默认拥有全部可用视频源）</option>
+              {!registrationDefaultGroupExists && (
+                <option value={registrationDefaultUserGroup}>
+                  已失效：{registrationDefaultUserGroup}
+                </option>
+              )}
+              {userGroups.map((group) => (
+                <option key={group.name} value={group.name}>
+                  {group.name}
+                </option>
+              ))}
+            </select>
+            {!registrationDefaultUserGroup && registrationEnabled && (
+              <p className='mt-2 text-xs text-yellow-700 dark:text-yellow-300'>
+                当前未设置默认用户组，新注册用户将不受用户组的视频源限制。
+              </p>
+            )}
+            {!registrationDefaultGroupExists && (
+              <p className='mt-2 text-xs text-red-600 dark:text-red-400'>
+                当前默认用户组已不存在，请重新选择；在修复前新用户不会自动分组。
+              </p>
+            )}
+            {storageMode === 'local' && (
+              <p className='mt-2 text-xs text-yellow-700 dark:text-yellow-300'>
+                LocalStorage 模式不支持多用户注册。配置 Redis、Upstash 或
+                Kvrocks 后即可在这里开启。
+              </p>
+            )}
+            {role !== 'owner' && storageMode !== 'local' && (
+              <p className='mt-2 text-xs text-gray-500 dark:text-gray-400'>
+                公开开放账号创建属于站点安全策略，仅站长可以修改。
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+
       {/* 用户统计 */}
       <div>
         <h4 className='text-sm font-medium text-gray-700 dark:text-gray-300 mb-3'>
@@ -2846,6 +3022,23 @@ const VideoSourceConfig = ({
     });
   };
 
+  // 切换该源是否走 m3u8 广告过滤代理（disable_ad_filter=true 时该源直连上游，跳过过滤）
+  const handleToggleAdFilter = (key: string) => {
+    const target = sources.find((s) => s.key === key);
+    if (!target) return;
+    const newDisable = !target.disable_ad_filter;
+
+    withLoading(`toggleAdFilter_${key}`, () =>
+      callSourceApi({
+        action: 'update_ad_filter',
+        key,
+        disable_ad_filter: newDisable,
+      }),
+    ).catch(() => {
+      console.error('切换广告过滤豁免失败', key);
+    });
+  };
+
   const handleDelete = (key: string) => {
     const target = sources.find((s) => s.key === key);
     if (!target) return;
@@ -3013,11 +3206,27 @@ const VideoSourceConfig = ({
                 console.log(`开始检测 ${data.totalSources} 个视频源`);
                 break;
 
+              case 'ping':
+                break;
+
               case 'source_result':
               case 'source_error':
                 // 更新验证结果
                 setValidationResults((prev) => {
                   const existing = prev.find((r) => r.key === data.source);
+                  const message =
+                    data.message ||
+                    (data.status === 'valid'
+                      ? '搜索正常'
+                      : data.status === 'no_results'
+                        ? '无法搜索到结果'
+                        : '连接失败');
+                  const resultCount =
+                    typeof data.resultCount === 'number'
+                      ? data.resultCount
+                      : data.status === 'valid'
+                        ? 1
+                        : 0;
                   if (existing) {
                     return prev.map((r) =>
                       r.key === data.source
@@ -3027,13 +3236,8 @@ const VideoSourceConfig = ({
                               sources.find((s) => s.key === data.source)
                                 ?.name || data.source,
                             status: data.status,
-                            message:
-                              data.status === 'valid'
-                                ? '搜索正常'
-                                : data.status === 'no_results'
-                                  ? '无法搜索到结果'
-                                  : '连接失败',
-                            resultCount: data.status === 'valid' ? 1 : 0,
+                            message,
+                            resultCount,
                           }
                         : r,
                     );
@@ -3046,13 +3250,8 @@ const VideoSourceConfig = ({
                           sources.find((s) => s.key === data.source)?.name ||
                           data.source,
                         status: data.status,
-                        message:
-                          data.status === 'valid'
-                            ? '搜索正常'
-                            : data.status === 'no_results'
-                              ? '无法搜索到结果'
-                              : '连接失败',
-                        resultCount: data.status === 'valid' ? 1 : 0,
+                        message,
+                        resultCount,
                       },
                     ];
                   }
@@ -3529,6 +3728,32 @@ const VideoSourceConfig = ({
             <span
               className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
                 source.is_adult ? 'translate-x-5' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </td>
+        <td className='px-6 py-4 whitespace-nowrap text-center'>
+          <button
+            onClick={() => handleToggleAdFilter(source.key)}
+            disabled={isLoading(`toggleAdFilter_${source.key}`)}
+            className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${
+              !source.disable_ad_filter
+                ? buttonStyles.toggleOn
+                : buttonStyles.toggleOff
+            } ${
+              isLoading(`toggleAdFilter_${source.key}`)
+                ? 'opacity-50 cursor-not-allowed'
+                : 'cursor-pointer hover:opacity-80'
+            }`}
+            title={
+              source.disable_ad_filter
+                ? '已豁免：该源直连上游，不删广告段'
+                : '已启用：通过 m3u8 过滤代理删除广告段'
+            }
+          >
+            <span
+              className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                !source.disable_ad_filter ? 'translate-x-5' : 'translate-x-0.5'
               }`}
             />
           </button>
@@ -4133,6 +4358,12 @@ const VideoSourceConfig = ({
                 </th>
                 <th className='px-6 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider'>
                   成人资源
+                </th>
+                <th
+                  className='px-6 py-3 text-center text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider'
+                  title='关闭后该源将跳过 m3u8 广告过滤代理，直连上游'
+                >
+                  广告过滤
                 </th>
                 <th className='px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider'>
                   有效性
@@ -5131,9 +5362,9 @@ const SiteConfigComponent = ({
     Announcement: '',
     SearchDownstreamMaxPage: 1,
     SiteInterfaceCacheTime: 7200,
-    DoubanProxyType: 'cmliussss-cdn-tencent',
+    DoubanProxyType: 'auto',
     DoubanProxy: '',
-    DoubanImageProxyType: 'cmliussss-cdn-tencent',
+    DoubanImageProxyType: 'auto',
     DoubanImageProxy: '',
     TmdbApiKey: '',
     TmdbProxyType: 'direct',
@@ -5141,17 +5372,26 @@ const SiteConfigComponent = ({
     TmdbReverseProxy: '',
     DisableYellowFilter: false,
     FluidSearch: true,
+    SearchResultLoadMode: 'infinite',
     LoginBackground: 'https://pan.yyds.nyc.mn/background.png',
   });
+
+  // 广告过滤总开关（独立于 SiteConfig，立即保存到 /api/admin/adfilter）
+  const [adFilterEnabled, setAdFilterEnabled] = useState(true);
+  const [adFilterSaving, setAdFilterSaving] = useState(false);
 
   // 豆瓣数据源相关状态
   const [isDoubanDropdownOpen, setIsDoubanDropdownOpen] = useState(false);
   const [isDoubanImageProxyDropdownOpen, setIsDoubanImageProxyDropdownOpen] =
     useState(false);
+  const [doubanDataTestResult, setDoubanDataTestResult] = useState('');
+  const [doubanImageTestResult, setDoubanImageTestResult] = useState('');
 
   // 豆瓣数据源选项
   const doubanDataSourceOptions = [
+    { value: 'auto', label: '智能自动（推荐）' },
     { value: 'direct', label: '直连（服务器直接请求豆瓣）' },
+    { value: 'server', label: '服务器代理' },
     { value: 'cors-proxy-zwei', label: 'Cors Proxy By Zwei' },
     {
       value: 'cmliussss-cdn-tencent',
@@ -5163,6 +5403,7 @@ const SiteConfigComponent = ({
 
   // 豆瓣图片代理选项
   const doubanImageProxyTypeOptions = [
+    { value: 'auto', label: '智能自动（推荐）' },
     { value: 'direct', label: '直连（浏览器直接请求豆瓣）' },
     { value: 'server', label: '服务器代理（由服务器代理请求豆瓣）' },
     { value: 'img3', label: '豆瓣官方精品 CDN（阿里云）' },
@@ -5197,11 +5438,9 @@ const SiteConfigComponent = ({
     if (config?.SiteConfig) {
       setSiteSettings({
         ...config.SiteConfig,
-        DoubanProxyType:
-          config.SiteConfig.DoubanProxyType || 'cmliussss-cdn-tencent',
+        DoubanProxyType: config.SiteConfig.DoubanProxyType || 'auto',
         DoubanProxy: config.SiteConfig.DoubanProxy || '',
-        DoubanImageProxyType:
-          config.SiteConfig.DoubanImageProxyType || 'cmliussss-cdn-tencent',
+        DoubanImageProxyType: config.SiteConfig.DoubanImageProxyType || 'auto',
         DoubanImageProxy: config.SiteConfig.DoubanImageProxy || '',
         TmdbApiKey: config.TMDBConfig?.ApiKey || '',
         TmdbProxyType: config.SiteConfig.TmdbProxyType || 'direct',
@@ -5209,12 +5448,44 @@ const SiteConfigComponent = ({
         TmdbReverseProxy: config.SiteConfig.TmdbReverseProxy || '',
         DisableYellowFilter: config.SiteConfig.DisableYellowFilter || false,
         FluidSearch: config.SiteConfig.FluidSearch ?? true,
+        SearchResultLoadMode:
+          config.SiteConfig.SearchResultLoadMode === 'pagination'
+            ? 'pagination'
+            : 'infinite',
         LoginBackground:
           config.SiteConfig.LoginBackground ||
           'https://pan.yyds.nyc.mn/background.png',
       });
     }
+    if (config?.AdFilterConfig) {
+      setAdFilterEnabled(config.AdFilterConfig.enabled ?? true);
+    }
   }, [config]);
+
+  // 切换广告过滤总开关，立即调用 /api/admin/adfilter 保存
+  const handleToggleAdFilterGlobal = async () => {
+    if (adFilterSaving) return;
+    const next = !adFilterEnabled;
+    setAdFilterEnabled(next); // 乐观更新
+    setAdFilterSaving(true);
+    try {
+      const resp = await fetch('/api/admin/adfilter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (!resp.ok) {
+        setAdFilterEnabled(!next); // 失败回滚
+        const err = await resp.json().catch(() => null);
+        showError(err?.error || '保存广告过滤开关失败');
+      }
+    } catch (e) {
+      setAdFilterEnabled(!next);
+      showError(e instanceof Error ? e.message : '保存广告过滤开关失败');
+    } finally {
+      setAdFilterSaving(false);
+    }
+  };
 
   // 点击外部区域关闭下拉框
   useEffect(() => {
@@ -5267,6 +5538,50 @@ const SiteConfigComponent = ({
     }));
   };
 
+  const handleTestDoubanProxy = async (target: 'data' | 'image') => {
+    const params = new URLSearchParams({
+      target,
+      proxyType:
+        target === 'data'
+          ? siteSettings.DoubanProxyType
+          : siteSettings.DoubanImageProxyType,
+      proxyUrl:
+        target === 'data'
+          ? siteSettings.DoubanProxy
+          : siteSettings.DoubanImageProxy,
+    });
+    const loadingKey = target === 'data' ? 'testDoubanData' : 'testDoubanImage';
+
+    await withLoading(loadingKey, async () => {
+      const resp = await fetch(`/api/douban/health?${params.toString()}`, {
+        cache: 'no-store',
+      });
+      const result = await resp.json().catch(() => ({}));
+      const attempts = Array.isArray(result.attempts) ? result.attempts : [];
+      const firstFailure = attempts.find((item: any) => !item.ok);
+      const message = result.ok
+        ? `成功：${result.provider}，${Math.round(result.durationMs || 0)}ms`
+        : `失败：${firstFailure?.reason || result.error || '未知错误'}`;
+
+      if (target === 'data') {
+        setDoubanDataTestResult(message);
+      } else {
+        setDoubanImageTestResult(message);
+      }
+
+      if (!resp.ok || !result.ok) {
+        throw new Error(message);
+      }
+
+      showSuccess(message, showAlert);
+    }).catch((err) => {
+      showError(
+        err instanceof Error ? err.message : '豆瓣代理检测失败',
+        showAlert,
+      );
+    });
+  };
+
   // 保存站点配置
   const handleSave = async () => {
     await withLoading('saveSiteConfig', async () => {
@@ -5283,6 +5598,7 @@ const SiteConfigComponent = ({
         }
 
         showSuccess('保存成功, 请刷新页面', showAlert);
+        window.dispatchEvent(new CustomEvent('doubanProxyChanged'));
         await refreshConfig();
       } catch (err) {
         showError(err instanceof Error ? err.message : '保存失败', showAlert);
@@ -5392,6 +5708,21 @@ const SiteConfigComponent = ({
           <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
             选择获取豆瓣数据的方式
           </p>
+          <div className='mt-2 flex items-center gap-2'>
+            <button
+              type='button'
+              onClick={() => handleTestDoubanProxy('data')}
+              disabled={isLoading('testDoubanData')}
+              className='inline-flex items-center px-3 py-1.5 rounded-lg text-xs bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-60'
+            >
+              {isLoading('testDoubanData') ? '检测中...' : '检测数据代理'}
+            </button>
+            {doubanDataTestResult && (
+              <span className='text-xs text-gray-500 dark:text-gray-400'>
+                {doubanDataTestResult}
+              </span>
+            )}
+          </div>
 
           {/* 感谢信息 */}
           {getThanksInfo(siteSettings.DoubanProxyType) && (
@@ -5503,6 +5834,21 @@ const SiteConfigComponent = ({
           <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
             选择获取豆瓣图片的方式
           </p>
+          <div className='mt-2 flex items-center gap-2'>
+            <button
+              type='button'
+              onClick={() => handleTestDoubanProxy('image')}
+              disabled={isLoading('testDoubanImage')}
+              className='inline-flex items-center px-3 py-1.5 rounded-lg text-xs bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-60'
+            >
+              {isLoading('testDoubanImage') ? '检测中...' : '检测图片代理'}
+            </button>
+            {doubanImageTestResult && (
+              <span className='text-xs text-gray-500 dark:text-gray-400'>
+                {doubanImageTestResult}
+              </span>
+            )}
+          </div>
 
           {/* 感谢信息 */}
           {getThanksInfo(siteSettings.DoubanImageProxyType) && (
@@ -5767,6 +6113,72 @@ const SiteConfigComponent = ({
         </div>
         <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
           启用后搜索结果将实时流式返回，提升用户体验。
+        </p>
+      </div>
+
+      {/* 搜索结果加载方式 */}
+      <div>
+        <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+          搜索结果加载方式
+        </label>
+        <div className='inline-flex rounded-lg border border-gray-300 bg-white p-1 dark:border-gray-600 dark:bg-gray-800'>
+          {[
+            { value: 'infinite' as const, label: '触底加载' },
+            { value: 'pagination' as const, label: '分页显示' },
+          ].map((option) => (
+            <button
+              key={option.value}
+              type='button'
+              onClick={() =>
+                setSiteSettings((prev) => ({
+                  ...prev,
+                  SearchResultLoadMode: option.value,
+                }))
+              }
+              className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
+                siteSettings.SearchResultLoadMode === option.value
+                  ? 'bg-green-600 text-white shadow-sm'
+                  : 'text-gray-700 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-700'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+        <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+          触底加载会随着下滑继续追加结果；分页显示则通过上一页/下一页切换。
+        </p>
+      </div>
+
+      {/* 广告过滤总开关（独立于其他 SiteConfig，立即保存） */}
+      <div>
+        <div className='flex items-center justify-between'>
+          <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+            启用 m3u8 广告过滤
+          </label>
+          <button
+            type='button'
+            onClick={handleToggleAdFilterGlobal}
+            disabled={adFilterSaving}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-green-500 focus:ring-offset-2 ${
+              adFilterEnabled ? buttonStyles.toggleOn : buttonStyles.toggleOff
+            } ${adFilterSaving ? 'opacity-50 cursor-not-allowed' : ''}`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full ${
+                buttonStyles.toggleThumb
+              } transition-transform ${
+                adFilterEnabled
+                  ? buttonStyles.toggleThumbOn
+                  : buttonStyles.toggleThumbOff
+              }`}
+            />
+          </button>
+        </div>
+        <p className='mt-1 text-xs text-gray-500 dark:text-gray-400'>
+          自动识别并删除 CMS 资源站 m3u8 中由 #EXT-X-DISCONTINUITY
+          拼接的广告分段。
+          关掉后所有源直连上游，不再走过滤代理。可在视频源列表里对单个源单独豁免。
         </p>
       </div>
 
@@ -7523,14 +7935,14 @@ const DanmuConfigComponent = ({ config, refreshConfig }: DanmuConfigProps) => {
               <p className='text-sm font-medium text-gray-900 dark:text-gray-100'>
                 {danmuSettings.enabled
                   ? '自定义弹幕服务已启用'
-                  : '使用内置弹弹play弹幕服务'}
+                  : '弹弹play官方弹幕链路'}
               </p>
               <p className='text-xs text-gray-500 dark:text-gray-400 mt-0.5'>
                 {danmuSettings.enabled
                   ? danmuSettings.serverUrl
                     ? `服务器: ${getFullServerUrl()}`
                     : '请配置弹幕服务器地址'
-                  : '当前使用 Docker 镜像内置的弹弹play API 提供弹幕'}
+                  : 'Vercel 可回退托管中继；Docker 需自有凭证或显式中继'}
               </p>
             </div>
           </div>
@@ -9909,6 +10321,7 @@ function AdminPageClient() {
               <UserConfig
                 config={config}
                 role={role}
+                storageMode={storageMode}
                 refreshConfig={refreshConfigAfterMutation}
               />
             </CollapsibleTab>
